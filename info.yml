@@ -1,0 +1,20 @@
+# MIT License
+# Copyright (c) 2026 Netherlands Film Academy
+
+display_name: "Shot Context"
+description: "Playblast the current shot (never submitted) and play it between the previous and the next shot."
+
+configuration:
+    display_name:
+        type: str
+        description: Name of the menu item (an ellipsis is added). Leave empty to hide the menu item.
+        default_value: "Shot Context"
+
+supported_engines: [tk-maya]
+
+requires_shotgun_fields:
+
+requires_core_version: "v0.19.0"
+requires_engine_version:
+
+frameworks:

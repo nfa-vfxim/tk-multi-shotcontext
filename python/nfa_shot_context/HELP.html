@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NFA Shot Context · Help</title>
+<style>
+  :root { --bg:#1b1c1f; --panel:#2f3237; --card:#25272b; --border:#34373d; --text:#e6e7ea; --dim:#8b8f98;
+          --accent:#3b82f6; --green:#4ade80; --blue:#2dd4bf; --amber:#fbbf24; --red:#f87171; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 20px 60px; }
+  h1 { font-size: 26px; margin: 0; }
+  .sub { color: var(--dim); font-size: 12px; letter-spacing: 2px; margin-bottom: 28px; }
+  h2 { font-size: 17px; margin: 34px 0 10px; color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin: 10px 0; }
+  code, kbd { background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td:first-child { white-space: nowrap; width: 1%; }
+  .pill { display:inline-block; border-radius: 4px; padding: 0 7px; color: #111; font-size: 12px; font-weight: 600; }
+  .g { background: var(--green); } .b { background: var(--blue); } .a { background: var(--amber); } .r { background: var(--red); }
+  ol li, ul li { margin: 4px 0; }
+  footer { color: var(--dim); font-size: 12px; margin-top: 40px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Shot Context</h1>
+  <div class="sub">MAYA · VFXIM PIPELINE</div>
+
+  <p>Shot Context lets you check your animation in the cut. One click playblasts your shot and plays it
+  between the shot before it and the shot after it, so you can judge continuity, timing and screen direction
+  across the cuts.</p>
+
+  <h2>Starting it</h2>
+  <ol>
+    <li>Start Maya from <b>ShotGrid Desktop</b> and open your shot through <b>ShotGrid &gt; File Open</b>.
+        The tool only works inside a ShotGrid shot.</li>
+    <li>Look through your shot camera in the viewport and set the timeline to your shot's frame range.</li>
+    <li>Click <b>Shot Context</b> on the NFA shelf.</li>
+  </ol>
+  <p>Your playblast is <b>never submitted to ShotGrid</b>. It's saved in your step's
+  <code>maya/previews/shot_context</code> folder so artists on the neighbouring shots see it too.
+  Only your three newest takes are kept.</p>
+
+  <h2>What you see</h2>
+  <p>Always three shots: the one before, yours, and the one after. On the first shot of the film you get
+  your shot and the next two; on the last shot, the two before and yours.</p>
+  <p>The order is the shot code, sequence by sequence, so the last shot of one sequence is followed by the
+  first shot of the next. Omitted shots are skipped.</p>
+  <p>For each neighbouring shot the tool shows the first thing it finds:</p>
+  <table>
+    <tr><td><span class="pill g">PLAYBLAST</span></td><td>The <b>newest playblast</b>: either the newest one on
+      ShotGrid (Review tool) or the newest one in the shot's Maya folders (Shot Context, Review tool, any
+      movie in <code>maya/previews</code>), whichever is newer. Its name and age are shown in the corner.</td></tr>
+    <tr><td><span class="pill b">FOOTAGE</span></td><td>No playblast yet: the plate reference movie from
+      <code>02_source</code>, a published plate movie, or a JPG/PNG plate sequence.</td></tr>
+    <tr><td><span class="pill a">NO FOOTAGE FOUND</span></td><td>No footage either: a card for as long as
+      the shot's duration on ShotGrid (cut duration, cut in/out, or the plate's frame count).</td></tr>
+    <tr><td><span class="pill a">NO FOOTAGE</span></td><td>No duration known at all: a card of 2 seconds.</td></tr>
+    <tr><td><span class="pill r">ERROR</span></td><td>A movie was found but couldn't be read. The reason is shown on the card.</td></tr>
+  </table>
+  <p>Movies are read once into a local cache (<code>%TEMP%\nfa_shot_context\cache</code>), so they play frame
+  accurately and open instantly the next time. Playback starts by itself as soon as everything is loaded.</p>
+
+  <h2>Controls</h2>
+  <div class="card">
+  <table>
+    <tr><td><kbd>Space</kbd> / click the picture</td><td>Play / pause</td></tr>
+    <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>One frame back / forward</td></tr>
+    <tr><td><kbd>PgUp</kbd> <kbd>PgDn</kbd> (or <kbd>↑</kbd> <kbd>↓</kbd>)</td><td>Previous / next shot. PgUp first goes to the start of the current shot.</td></tr>
+    <tr><td><kbd>Home</kbd> <kbd>End</kbd></td><td>Start / end of the three shots</td></tr>
+    <tr><td><kbd>L</kbd></td><td>Loop on / off (on by default)</td></tr>
+    <tr><td><kbd>M</kbd></td><td>Mute</td></tr>
+    <tr><td>Click or drag the bar</td><td>Scrub</td></tr>
+    <tr><td><b>Re-playblast</b></td><td>Playblast your shot again after a change; the neighbours stay loaded.</td></tr>
+  </table>
+  </div>
+  <p>Sound: your shot plays the scene's sound (the timeline sound, or the last audio node). A neighbouring
+  movie plays its own sound if it has any.</p>
+
+  <h2>Troubleshooting</h2>
+  <ul>
+    <li><b>"ShotGrid is not running in this Maya"</b>: Maya was started from the Start menu. Start it from ShotGrid Desktop.</li>
+    <li><b>"Shot Context only works inside a shot"</b>: you're in an asset or project context. Open your shot work file through ShotGrid &gt; File Open.</li>
+    <li><b>Wrong camera in the playblast</b>: click in the viewport with your shot camera before you start; the tool playblasts the active viewport.</li>
+    <li><b>"saved locally"</b> in the status bar: the shot folder wasn't writable. You can still watch it, but your neighbours won't see it.</li>
+    <li><b>No sound / sound problems</b>: set the environment variable <code>NFA_SHOT_CONTEXT_NO_AUDIO=1</code> to play without sound.</li>
+    <li>The Script Editor logs what was chosen for each shot, starting with <code>[NFA Shot Context]</code>.</li>
+  </ul>
+
+  <footer>NFA Shot Context v1.1.0 · Luuk Kamphuis</footer>
+</main>
+</body>
+</html>
