@@ -13,7 +13,7 @@ import os
 import time
 import traceback
 
-__version__ = "1.2.0"
+__version__ = "1.4.0"
 __author__ = "Luuk Kamphuis"
 
 _WINDOW = None
@@ -145,7 +145,8 @@ def show():
     try:
         progress.step("Reading the cut from ShotGrid…")
         shots = sg_lookup.list_shots(sc)
-        window = sg_lookup.pick_window(shots, sc.shot["id"])
+        window = sg_lookup.pick_window(shots, sc.shot["id"], 3)
+        sg_lookup.prefetch(sc, [shot for shot, role in window])
         fps = playblast.scene_fps()
         current = next(s for s, role in window if role == "current")
 
@@ -184,10 +185,18 @@ def show():
         return
     progress.close()
 
-    slots = []
-    for info in infos:
-        slot = viewer.Slot(info, fps)
+    slot_by_id = {}
+    cut_index = {shot["id"]: n for n, shot in enumerate(shots, 1)}
+
+    def place(slot, shot):
+        slot.cut_position = (cut_index[shot["id"]], len(shots)) if shot["id"] in cut_index else None
+
+    def fill_slot(slot, info):
+        """Copy what was looked up into the slot the viewer shows."""
         m = info.media
+        slot.info = info
+        slot.kind, slot.media, slot.options = info.kind, m, list(info.options)
+        slot.placeholder = info.duration or slot.placeholder
         if info.role == "current":
             slot.frames = list(pb.frames)
             slot.first_frame = pb.first_frame
@@ -197,20 +206,52 @@ def show():
                 slot.audio_start_frame = pb.audio_offset - pb.first_frame
                 slot.scene_audio = (slot.audio_path, slot.audio_start_frame)
             slot.description = "Playblast of %s" % (pb.camera or "the viewport")
-        elif m is not None and m.kind == "frames":
-            slot.frames = list(m.frames)
-        if m is not None and info.role != "current":
-            when = viewer._age(m.timestamp) if m.timestamp else ""
-            slot.description = "%s%s" % (m.label, (" · " + when) if when else "")
-        slots.append(slot)
+        else:
+            if m is not None and m.kind == "frames":
+                slot.frames = list(m.frames)
+                slot.first_frame = viewer._first_number(m.frames[0], default=1)
+            if m is not None:
+                when = viewer._age(m.timestamp) if m.timestamp else ""
+                slot.description = "%s%s" % (m.label, (" · " + when) if when else "")
         print("[NFA Shot Context] %s (%s): %s %s" % (info.code, info.role, info.kind,
                                                       m.path if m else "; ".join(info.notes)))
+
+    for info in infos:
+        slot = viewer.Slot(info, fps)
+        fill_slot(slot, info)
+        place(slot, info.shot)
+        slot_by_id[info.shot["id"]] = slot
+    slots = [slot_by_id[info.shot["id"]] for info in infos]
+
+    def slots_for_count(size):
+        """Slots for *size* shots around yours (None = all); new shots start as placeholders."""
+        chosen = sg_lookup.pick_window(shots, sc.shot["id"], size)
+        new = [shot for shot, role in chosen if shot["id"] not in slot_by_id]
+        if new:
+            sg_lookup.prefetch(sc, new)  # one ShotGrid query for all new shots
+        out = []
+        for shot, role in chosen:
+            slot = slot_by_id.get(shot["id"])
+            if slot is None:
+                placeholder = sg_lookup.ShotInfo(shot, role)
+                placeholder.duration, placeholder.duration_source = sg_lookup.shot_duration(shot)
+                slot = viewer.Slot(placeholder, fps)
+                slot.pending = slot.loading = True
+                place(slot, shot)
+                slot_by_id[shot["id"]] = slot
+            out.append(slot)
+        return out
+
+    def resolve_slot(slot):
+        info = sg_lookup.resolve_neighbour(sc, slot.info.shot, slot.role, fps)
+        fill_slot(slot, info)
 
     step = (sc.step or {}).get("name") or ""
     context_text = "  ·  ".join(x for x in ((sc.project or {}).get("name"), current.get("code"), step) if x)
     _WINDOW = viewer.ShotContextWindow(slots, fps, context_text=context_text, status=_status_for(pb),
                                        resolve_media=lambda m: sg_lookup.ensure_local(sc, m),
-                                       parent=_maya_main_window())
+                                       slots_for_count=slots_for_count, resolve_slot=resolve_slot,
+                                       count=3, parent=_maya_main_window())
     _WINDOW.setAttribute(viewer.QtCore.Qt.WA_DeleteOnClose, True)
     _WINDOW.show()
     _WINDOW.raise_()

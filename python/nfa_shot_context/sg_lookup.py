@@ -242,8 +242,10 @@ def sort_shots(shots):
 
 def pick_window(shots, current_id, size=3):
     """
-    *size* shots around the current one. At the start or end of the cut the
-    window shifts so there are still *size* shots (when the project has them).
+    *size* shots around the current one (None = the whole cut). Odd sizes put
+    the current shot in the middle; even sizes show one more shot before it
+    than after it. At the start or end of the cut the window shifts so there are
+    still *size* shots (when the project has them).
     Returns [(shot, role)], role is "previous", "current" or "next".
     """
     ids = [s["id"] for s in shots]
@@ -251,7 +253,7 @@ def pick_window(shots, current_id, size=3):
         raise NotAvailable("The current shot was not found in the project's shot list.")
     i = ids.index(current_id)
     n = len(shots)
-    size = min(size, n)
+    size = n if size is None else max(1, min(int(size), n))
     start = i - size // 2
     start = max(0, min(start, n - size))
     out = []
@@ -353,14 +355,50 @@ def is_playblast_version(version):
     return any(m in name for m in PLAYBLAST_NAME_MARKERS)
 
 
-def shotgrid_playblasts(sc, shot):
-    """Playblast Versions of a shot as Media (local file, or downloaded upload)."""
-    fields = ["code", "created_at", "sg_path_to_movie", "sg_uploaded_movie", "user"]
-    try:
-        versions = sc.sg.find("Version", [["entity", "is", {"type": "Shot", "id": shot["id"]}]],
+VERSION_FIELDS = ["code", "created_at", "sg_path_to_movie", "sg_uploaded_movie", "user", "entity"]
+PUBLISH_FIELDS = ["code", "path", "created_at", "published_file_type", "entity"]
+
+
+def _batch_find(sc, entity_type, shots, fields, cache_name):
+    """One ShotGrid query for many shots; results cached per shot id on *sc*."""
+    cache = sc.__dict__.setdefault(cache_name, {})
+    todo = [s for s in shots if s["id"] not in cache]
+    for start in range(0, len(todo), 100):
+        chunk = todo[start:start + 100]
+        try:
+            rows = sc.sg.find(entity_type, [["entity", "in", [{"type": "Shot", "id": s["id"]} for s in chunk]]],
                               fields, order=[{"field_name": "created_at", "direction": "desc"}])
+        except Exception:
+            continue  # leave uncached; the per-shot query below tries again
+        for s in chunk:
+            cache[s["id"]] = []
+        for r in rows:
+            sid = (r.get("entity") or {}).get("id")
+            if sid in cache:
+                cache[sid].append(r)
+    return cache
+
+
+def prefetch(sc, shots):
+    """Fetch Versions and PublishedFiles of many shots in a few queries."""
+    _batch_find(sc, "Version", shots, VERSION_FIELDS, "_version_cache")
+    _batch_find(sc, "PublishedFile", shots, PUBLISH_FIELDS, "_publish_cache")
+
+
+def _rows(sc, entity_type, shot, fields, cache_name):
+    cache = sc.__dict__.get(cache_name) or {}
+    if shot["id"] in cache:
+        return cache[shot["id"]]
+    try:
+        return sc.sg.find(entity_type, [["entity", "is", {"type": "Shot", "id": shot["id"]}]],
+                          fields, order=[{"field_name": "created_at", "direction": "desc"}])
     except Exception:
         return []
+
+
+def shotgrid_playblasts(sc, shot):
+    """Playblast Versions of a shot as Media (local file, or downloaded upload)."""
+    versions = _rows(sc, "Version", shot, VERSION_FIELDS, "_version_cache")
     out = []
     for v in versions:
         if not is_playblast_version(v):
@@ -461,15 +499,7 @@ def find_footage(sc, shot):
         p = refs[-1]
         return Media("movie", p, _mtime(p), os.path.basename(p), source="footage"), plate_frames
 
-    try:
-        pubs = sc.sg.find(
-            "PublishedFile",
-            [["entity", "is", {"type": "Shot", "id": shot["id"]}]],
-            ["code", "path", "created_at", "published_file_type"],
-            order=[{"field_name": "created_at", "direction": "desc"}],
-        )
-    except Exception:
-        pubs = []
+    pubs = _rows(sc, "PublishedFile", shot, PUBLISH_FIELDS, "_publish_cache")
     for pub in pubs:
         ptype = ((pub.get("published_file_type") or {}).get("name") or "").lower()
         if not any(m in ptype for m in FOOTAGE_TYPE_MARKERS):

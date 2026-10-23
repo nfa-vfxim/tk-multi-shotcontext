@@ -1,5 +1,19 @@
 # NFA Shot Context — Changelog
 
+## [1.4.0] — 2026-10-23 (Luuk)
+- The shot bar scrolls like an editor's timeline: blocks stay at least 130 px wide so code, status, frames and ▾
+  stay readable, and a scrollbar appears under the bar when they don't fit (mouse wheel works too). The bar
+  follows the playhead during playback and shot jumps.
+
+## [1.3.0] — 2026-10-23 (Luuk)
+- **Shots** box: 1, 3 (default), 5, 7, All, or type a number. Even numbers show one more shot before yours.
+  New shots appear at once and are looked up one by one, nearest first; Versions and PublishedFiles of all new
+  shots come from one ShotGrid query each. Movies load at most 3 at a time, nearest first. Shots that were
+  already loaded (and the version you picked) stay.
+- Right-click a shot (or its ▾): **Disable for playback** — playback, loop and the shot buttons skip it.
+  The last shot that's on can't be disabled.
+- The picture shows each shot's number in the cut (e.g. SHOT 21/50).
+
 ## [1.2.0] — 2026-10-23 (Luuk)
 - Choose a version per shot: the ▾ button on each shot in the bar (or right-click) lists every playblast of that
   shot (ShotGrid and Maya folders, newest first) plus the footage; your own shot also lists your earlier takes.

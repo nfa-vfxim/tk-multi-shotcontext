@@ -17,9 +17,11 @@ class FakeSG:
     def find_one(self, *a, **k): return {"sg_projectcode": "p123"}
     def find(self, t, filters, fields, order=None):
         if t == "Shot": return [dict(s) for s in self.shots]
-        sid = filters[0][2]["id"]
+        self.calls = getattr(self, "calls", 0) + 1
+        val = filters[0][2]
+        ids = [x["id"] for x in val] if isinstance(val, list) else [val["id"]]
         src = self.versions if t == "Version" else self.pubs
-        return [dict(v) for v in src if v["_shot"] == sid]
+        return [dict(v, entity={"type": "Shot", "id": v["_shot"]}) for v in src if v["_shot"] in ids]
 
 class FakeTK:
     roots = {"primary": ROOT}
@@ -50,6 +52,17 @@ assert roles(4)[0][0] == "0020" and roles(4)[2][:2] == ("0010", "B")    # crosse
 assert [r for *_, r in roles(3)] == ["current", "next", "next"]          # first shot: shifted
 assert [r for *_, r in roles(6)] == ["previous", "previous", "current"]  # last shot: shifted
 assert len(L.pick_window([shots[0]], 1)) == 1
+# variable sizes: 1 = only yours; even sizes show one more after; None = all; custom numbers
+cut = L.list_shots(sc)          # ids 3, 2, 4, 1, 6
+def ids(cur, size): return [s["id"] for s, r in L.pick_window(cut, cur, size)]
+assert ids(4, 1) == [4]
+assert ids(4, 4) == [3, 2, 4, 1]          # 2 before, 1 after
+assert ids(4, None) == [3, 2, 4, 1, 6]
+assert ids(4, 99) == [3, 2, 4, 1, 6]
+assert ids(3, 4) == [3, 2, 4, 1]          # first shot: shifted
+assert ids(6, 4) == [2, 4, 1, 6]          # last shot: shifted
+assert ids(6, 2) == [1, 6]                # last shot
+assert [r for s, r in L.pick_window(cut, 4, None)] == ["previous", "previous", "current", "next", "next"]
 assert len(L.pick_window(shots[:2], 1)) == 2
 
 # ---- durations
@@ -91,6 +104,8 @@ gm = touch(os.path.join(ROOT, "elsewhere", "plate.mov"))
 pubs = [{"_shot": 16, "code": "plate", "path": {"local_path": gm}, "created_at": now, "published_file_type": {"name": "Plate"}}]
 
 sc = mk([a,b,c,d,e,f,g], versions=versions, pubs=pubs)
+L.prefetch(sc, [a,b,c,d,e,f,g])
+assert sc.sg.calls == 2, sc.sg.calls      # one Version + one PublishedFile query for all shots
 def res(s): return L.resolve_neighbour(sc, s, "next", 25.0)
 ra, rb, rc, rd, re_, rf, rg = map(res, [a,b,c,d,e,f,g])
 for r in (ra, rb, rc, rd, re_, rf, rg): print(r, r.duration, r.notes)
@@ -101,6 +116,8 @@ assert rd.kind == "slate" and rd.duration == 60 and rd.slate_text == "NO FOOTAGE
 assert re_.kind == "slate" and re_.duration == 24 and re_.slate_text == "NO FOOTAGE FOUND"
 assert rf.kind == "slate" and rf.duration == 50 and rf.slate_text == "NO FOOTAGE"
 assert rg.kind == "footage" and rg.media.path == gm
+assert sc.sg.calls == 2, sc.sg.calls      # resolving used the prefetched rows, no extra queries
+assert [m.label for m in ra.options][:1] == ["p_WFT_0010_main_v004"] and len(ra.options) == 2
 assert not L.is_playblast_version({"sg_path_to_movie": "/x/nuke/comp.mov", "code": "comp"})
 shutil.rmtree(ROOT)
 print("ALL OK")

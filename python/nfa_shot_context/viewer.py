@@ -26,7 +26,7 @@ from . import media
 __all__ = ["Slot", "ShotContextWindow"]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.2.0"
+VERSION = "1.4.0"
 AUTHOR = "Luuk Kamphuis"
 
 # --- Theme: same black look as the Review tool's playblast preview
@@ -131,6 +131,51 @@ QPushButton#PrimaryButton:disabled {{
     color: {muted};
     background-color: {border};
 }}
+QComboBox#CountBox {{
+    color: {text};
+    background-color: {bg};
+    border: 1px solid {border};
+    border-radius: 8px;
+    padding: 4px 8px;
+}}
+QComboBox#CountBox:hover {{
+    border-color: {muted};
+}}
+QComboBox#CountBox::drop-down {{
+    border: none;
+    width: 18px;
+}}
+QComboBox#CountBox::down-arrow {{
+    image: url(ARROW_PNG);
+    width: 10px;
+    height: 6px;
+}}
+QComboBox#CountBox QAbstractItemView {{
+    color: {text};
+    background-color: {surface};
+    border: 1px solid {border};
+    selection-background-color: {surface_hover};
+    outline: none;
+}}
+QScrollBar#TimelineScroll:horizontal {{
+    background: transparent;
+    height: 8px;
+    margin: 0 4px;
+}}
+QScrollBar#TimelineScroll::handle:horizontal {{
+    background: {border};
+    border-radius: 4px;
+    min-width: 40px;
+}}
+QScrollBar#TimelineScroll::handle:horizontal:hover {{
+    background: {muted};
+}}
+QScrollBar#TimelineScroll::add-line, QScrollBar#TimelineScroll::sub-line {{
+    width: 0px;
+}}
+QScrollBar#TimelineScroll::add-page, QScrollBar#TimelineScroll::sub-page {{
+    background: none;
+}}
 QToolTip {{
     color: {text};
     background-color: {surface};
@@ -139,6 +184,27 @@ QToolTip {{
 }}
 """.format(bg=BG, surface=CARD, surface_hover=PANEL, border=BORDER, text=TEXT, muted=DIM,
            accent=ACCENT, accent_hover=ACCENT_HOVER, accent_pressed=ACCENT_PRESSED)
+
+
+def _arrow_png():
+    """Small down arrow for the count box (Qt stylesheets can't draw one reliably)."""
+    import tempfile
+    path = os.path.join(tempfile.gettempdir(), "nfa_shot_context", "arrow_down.png")
+    if not os.path.isfile(path):
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            pm = QtGui.QPixmap(20, 12)
+            pm.fill(QtCore.Qt.transparent)
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.Antialiasing)
+            p.setPen(QtCore.Qt.NoPen)
+            p.setBrush(QtGui.QColor(DIM))
+            p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(4, 3), QtCore.QPointF(16, 3), QtCore.QPointF(10, 10)]))
+            p.end()
+            pm.save(path)
+        except Exception:
+            return ""
+    return path.replace("\\", "/")
 
 
 def _first_number(path, default=1):
@@ -269,6 +335,9 @@ class Slot(object):
         self.scene_audio = None             # (path, start frame) for the fresh playblast
         self.fresh = None                   # the playblast made when the tool opened
         self.decoder = None
+        self.pending = False                # True until the shot has been looked up
+        self.disabled = False               # skipped during playback (right-click to toggle)
+        self.cut_position = None            # (number in the cut, shots in the cut), 1-based
 
     @property
     def length(self):
@@ -372,6 +441,11 @@ class FrameView(QtWidgets.QWidget):
         if self.image is not None and not self.image.isNull():
             target = self._fit(self.image.width(), self.image.height())
             p.drawImage(target, self.image)
+            if slot.disabled:
+                p.fillRect(target, QtGui.QColor(0, 0, 0, 170))
+                p.setPen(QtGui.QColor(TEXT))
+                p.setFont(QtGui.QFont("Segoe UI", max(12, int(target.height() / 16)), QtGui.QFont.Bold))
+                p.drawText(target, QtCore.Qt.AlignCenter, "DISABLED")
         else:
             ref = getattr(self.parent(), "aspect", (16, 9))
             target = self._fit(*ref)
@@ -382,7 +456,11 @@ class FrameView(QtWidgets.QWidget):
         colour = QtGui.QColor(KIND_COLOURS.get(slot.kind, DIM))
         font = QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold)
         p.setFont(font)
-        tag = "%s  ·  %s" % (slot.code, KIND_LABELS.get(slot.kind, ""))
+        parts = [slot.code]
+        if slot.cut_position:
+            parts.append("SHOT %d/%d" % slot.cut_position)
+        parts.append(KIND_LABELS.get(slot.kind, ""))
+        tag = "  ·  ".join(parts)
         if slot.role == "current":
             tag += "  ·  YOUR SHOT"
         fm = QtGui.QFontMetrics(font)
@@ -424,7 +502,15 @@ class FrameView(QtWidgets.QWidget):
             self._play_icon.paint(p, icon_rect)
 
     def _paint_card(self, p, rect, slot):
-        if slot.loading:
+        if slot.disabled and not slot.frames:
+            title = "DISABLED"
+            sub = "Skipped during playback. Right-click the shot in the bar to enable it."
+            colour = QtGui.QColor(DIM)
+        elif slot.pending:
+            title = "LOOKING UP"
+            sub = "Finding playblasts and footage for %s…" % slot.code
+            colour = QtGui.QColor(DIM)
+        elif slot.loading:
             title = "LOADING"
             sub = "Reading %s…  %d%%" % (slot.code, int(slot.progress * 100))
             colour = QtGui.QColor(DIM)
@@ -447,7 +533,7 @@ class FrameView(QtWidgets.QWidget):
         p.setPen(QtGui.QColor(DIM))
         p.setFont(QtGui.QFont("Segoe UI", max(8, int(rect.height() / 34))))
         p.drawText(rect.adjusted(20, rect.height() * 0.32, -20, 0), QtCore.Qt.AlignCenter | QtCore.Qt.TextWordWrap, sub)
-        if slot.loading:
+        if slot.loading and not slot.pending:
             bar = QtCore.QRectF(rect.center().x() - 80, rect.bottom() - rect.height() * 0.18, 160, 4)
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(QtGui.QColor(BORDER))
@@ -461,10 +547,15 @@ class FrameView(QtWidgets.QWidget):
 
 
 class TimelineBar(QtWidgets.QWidget):
-    """Three blocks, one per shot, sized by length; click or drag to scrub."""
+    """
+    One block per shot, sized by length but never narrower than MIN_BLOCK, so the
+    text stays readable. When the blocks don't fit, the bar scrolls (offset)."""
+
+    MIN_BLOCK = 130
 
     scrubbed = QtCore.Signal(int)
     scrub_state = QtCore.Signal(bool)
+    layout_changed = QtCore.Signal()                   # content width or offset changed
     version_menu = QtCore.Signal(int, QtCore.QPoint)   # slot index, global position
 
     def __init__(self, parent=None):
@@ -477,19 +568,92 @@ class TimelineBar(QtWidgets.QWidget):
         self.position = 0
         self.total = 1
         self._menu_rects = {}
+        self.offset = 0.0
+        self._blocks = []          # (x0, x1) per slot, in content coordinates
+        self.content_width = 0.0
 
     def set_slots(self, slots):
         self.slots = slots
         self.total = max(1, sum(s.length for s in slots))
+        self._layout()
         self.update()
 
     def set_position(self, frame):
         self.position = frame
         self.update()
 
+    def view_width(self):
+        return max(1.0, self.width() - 4.0)
+
+    def _layout(self):
+        """Block widths: proportional to length, at least MIN_BLOCK, filling the bar when they fit."""
+        view = self.view_width()
+        lengths = [max(1, sl.length) for sl in self.slots]
+        if not lengths:
+            self._blocks, self.content_width = [], view
+            return
+        # find a scale where blocks fill the view; small blocks are lifted to MIN_BLOCK
+        scale = view / float(sum(lengths))
+        for _ in range(8):
+            widths = [max(self.MIN_BLOCK, n * scale) for n in lengths]
+            fixed = sum(w for w, n in zip(widths, lengths) if n * scale < self.MIN_BLOCK)
+            free = sum(n for n in lengths if n * scale >= self.MIN_BLOCK)
+            if not free or view - fixed <= 0:
+                break
+            new_scale = (view - fixed) / float(free)
+            if abs(new_scale - scale) < 1e-6:
+                break
+            scale = new_scale
+        widths = [max(self.MIN_BLOCK, n * scale) for n in lengths]
+        if sum(widths) < view:  # everything fits: stretch to fill
+            k = view / sum(widths)
+            widths = [w * k for w in widths]
+        x, self._blocks = 0.0, []
+        for w in widths:
+            self._blocks.append((x, x + w))
+            x += w
+        self.content_width = x
+        self.offset = max(0.0, min(self.offset, self.content_width - view))
+        self.layout_changed.emit()
+
+    def resizeEvent(self, event):
+        super(TimelineBar, self).resizeEvent(event)
+        self._layout()
+
+    def set_offset(self, offset):
+        offset = max(0.0, min(float(offset), self.content_width - self.view_width()))
+        if offset != self.offset:
+            self.offset = offset
+            self.update()
+            self.layout_changed.emit()
+
+    def ensure_visible(self, frame, margin=40):
+        """Scroll so *frame* is in view (page-style, like an editor's timeline)."""
+        if self.content_width <= self.view_width():
+            return
+        x = self._content_x(frame)
+        view = self.view_width()
+        if x < self.offset + margin or x > self.offset + view - margin:
+            self.set_offset(x - margin)
+
+    def _content_x(self, frame):
+        start = 0
+        for (x0, x1), sl in zip(self._blocks, self.slots):
+            if frame < start + sl.length:
+                return x0 + (x1 - x0) * (frame - start) / float(max(1, sl.length))
+            start += sl.length
+        return self.content_width
+
     def _x(self, frame):
-        r = self.rect().adjusted(2, 0, -2, 0)
-        return r.x() + r.width() * frame / float(self.total)
+        return 2.0 + self._content_x(frame) - self.offset
+
+    def wheelEvent(self, event):
+        if self.content_width <= self.view_width():
+            return
+        d = event.angleDelta()
+        step = d.x() if abs(d.x()) > abs(d.y()) else d.y()
+        self.set_offset(self.offset - step)
+        event.accept()
 
     def paintEvent(self, event):
         p = QtGui.QPainter(self)
@@ -497,8 +661,14 @@ class TimelineBar(QtWidgets.QWidget):
         top, h = 4, self.height() - 8
         start = 0
         self._menu_rects = {}
+        if len(self._blocks) != len(self.slots):
+            self._layout()
         for index, slot in enumerate(self.slots):
-            x0, x1 = self._x(start), self._x(start + slot.length)
+            bx0, bx1 = self._blocks[index]
+            x0, x1 = 2.0 + bx0 - self.offset, 2.0 + bx1 - self.offset
+            if x1 < 0 or x0 > self.width():
+                start += slot.length
+                continue
             rect = QtCore.QRectF(x0 + 1.5, top, x1 - x0 - 3, h)
             current = slot.role == "current"
             p.setPen(QtGui.QPen(QtGui.QColor(ACCENT if current else BORDER), 1.5 if current else 1))
@@ -508,12 +678,19 @@ class TimelineBar(QtWidgets.QWidget):
                 p.setPen(QtCore.Qt.NoPen)
                 p.setBrush(QtGui.QColor(59, 130, 246, 50))
                 p.drawRoundedRect(QtCore.QRectF(rect.x(), rect.y(), rect.width() * slot.progress, rect.height()), 8, 8)
+            if slot.disabled:
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(QtGui.QColor(0, 0, 0, 150))
+                p.drawRoundedRect(rect, 8, 8)
             kind = "error" if slot.error else slot.kind
             colour = QtGui.QColor(KIND_COLOURS.get(kind, DIM))
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(colour)
             p.drawRoundedRect(QtCore.QRectF(rect.x() + 8, rect.bottom() - 7, max(0.0, rect.width() - 16), 3), 1.5, 1.5)
             text_rect = rect.adjusted(10, 5, -10, -10)
+            if rect.width() < 34:
+                start += slot.length
+                continue
             if len(slot.options) > 1 and rect.width() > 70:
                 # version button (top right of the block)
                 btn = QtCore.QRectF(rect.right() - 30, rect.y() + 6, 22, 20)
@@ -526,7 +703,7 @@ class TimelineBar(QtWidgets.QWidget):
                 p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(c.x() - 4, c.y() - 2), QtCore.QPointF(c.x() + 4, c.y() - 2),
                                                QtCore.QPointF(c.x(), c.y() + 3)]))
                 text_rect = text_rect.adjusted(0, 0, -28, 0)
-            p.setPen(QtGui.QColor(TEXT))
+            p.setPen(QtGui.QColor(DIM if slot.disabled else TEXT))
             p.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold))
             fm = p.fontMetrics()
             p.drawText(text_rect, QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
@@ -534,7 +711,8 @@ class TimelineBar(QtWidgets.QWidget):
             p.setPen(QtGui.QColor(DIM))
             p.setFont(QtGui.QFont("Segoe UI", 8))
             fm = p.fontMetrics()
-            sub = "%s · %d f" % ("LOADING" if slot.loading else KIND_LABELS.get(kind, ""), slot.length)
+            sub = "%s · %d f" % ("DISABLED" if slot.disabled else "LOOKING UP" if slot.pending
+                                 else "LOADING" if slot.loading else KIND_LABELS.get(kind, ""), slot.length)
             p.drawText(text_rect.adjusted(0, 18, 0, 0), QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop,
                        fm.elidedText(sub, QtCore.Qt.ElideRight, int(text_rect.width())))
             start += slot.length
@@ -544,16 +722,20 @@ class TimelineBar(QtWidgets.QWidget):
         p.drawLine(QtCore.QPointF(x, 0), QtCore.QPointF(x, self.height()))
 
     def _frame_at(self, x):
-        r = self.rect().adjusted(2, 0, -2, 0)
-        f = int((x - r.x()) / float(max(1, r.width())) * self.total)
-        return max(0, min(self.total - 1, f))
+        cx = x - 2.0 + self.offset
+        start = 0
+        for (x0, x1), sl in zip(self._blocks, self.slots):
+            if cx < x1:
+                f = start + int(max(0.0, cx - x0) / max(1.0, x1 - x0) * sl.length)
+                return max(0, min(self.total - 1, f))
+            start += sl.length
+        return self.total - 1
 
     def _slot_at(self, x):
-        start = 0
-        for i, slot in enumerate(self.slots):
-            if self._x(start) <= x < self._x(start + slot.length):
+        cx = x - 2.0 + self.offset
+        for i, (x0, x1) in enumerate(self._blocks):
+            if cx < x1:
                 return i
-            start += slot.length
         return len(self.slots) - 1
 
     def mousePressEvent(self, event):
@@ -564,9 +746,7 @@ class TimelineBar(QtWidgets.QWidget):
                 self.version_menu.emit(index, glob)
                 return
         if event.button() == QtCore.Qt.RightButton:
-            index = self._slot_at(pos.x())
-            if len(self.slots[index].options) > 1:
-                self.version_menu.emit(index, glob)
+            self.version_menu.emit(self._slot_at(pos.x()), glob)
             return
         if event.button() == QtCore.Qt.LeftButton:
             self.scrub_state.emit(True)
@@ -575,7 +755,7 @@ class TimelineBar(QtWidgets.QWidget):
     def mouseMoveEvent(self, event):
         pos = event.position() if hasattr(event, "position") else QtCore.QPointF(event.pos())
         over = any(r.contains(pos) for r in self._menu_rects.values())
-        self.setToolTip("Choose another version of this shot" if over else "")
+        self.setToolTip("Versions / disable this shot  (or right-click)" if over else "")
         if event.buttons() & QtCore.Qt.LeftButton:
             self.scrubbed.emit(self._frame_at(event.position().x() if hasattr(event, "position") else event.x()))
 
@@ -592,16 +772,25 @@ class ShotContextWindow(QtWidgets.QDialog):
                   uploaded ShotGrid movie). Used when the artist picks another version.
     """
 
-    def __init__(self, slots, fps, context_text="", status="", resolve_media=None, parent=None):
+    MAX_DECODERS = 3
+
+    def __init__(self, slots, fps, context_text="", status="", resolve_media=None,
+                 slots_for_count=None, resolve_slot=None, count=3, parent=None):
         super(ShotContextWindow, self).__init__(parent)
         self.setObjectName("ShotContext")
         self.setWindowTitle("NFA Shot Context")
-        self.setStyleSheet(STYLE)
+        self.setStyleSheet(STYLE.replace("ARROW_PNG", _arrow_png()))
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowMaximizeButtonHint)
         self.resize(1180, 820)
         self.fps = float(fps or 25.0)
         self.slots = slots
         self.resolve_media = resolve_media
+        self.slots_for_count = slots_for_count   # callable(size or None) -> [Slot]
+        self.resolve_slot = resolve_slot         # callable(Slot) -> None, looks up a pending slot
+        self.count = count
+        self._resolve_timer = QtCore.QTimer(self)
+        self._resolve_timer.setSingleShot(True)
+        self._resolve_timer.timeout.connect(self._resolve_next)
         self.aspect = (16, 9)
         self._decoders = []
         self._cache = collections.OrderedDict()
@@ -667,7 +856,15 @@ class ShotContextWindow(QtWidgets.QDialog):
         self.timeline.scrubbed.connect(self._on_scrub)
         self.timeline.scrub_state.connect(self._on_scrub_state)
         self.timeline.version_menu.connect(self._show_versions)
-        root.addWidget(self.timeline)
+        self.timeline_scroll = QtWidgets.QScrollBar(QtCore.Qt.Horizontal)
+        self.timeline_scroll.setObjectName("TimelineScroll")
+        self.timeline_scroll.valueChanged.connect(lambda v: self.timeline.set_offset(v))
+        self.timeline.layout_changed.connect(self._sync_scrollbar)
+        tl = QtWidgets.QVBoxLayout()
+        tl.setSpacing(4)
+        tl.addWidget(self.timeline)
+        tl.addWidget(self.timeline_scroll)
+        root.addLayout(tl)
 
         # --- transport ---
         transport = QtWidgets.QFrame()
@@ -712,6 +909,25 @@ class ShotContextWindow(QtWidgets.QDialog):
         self.frame_total.setMinimumWidth(70)
         row.addWidget(self.frame_total)
         row.addStretch(1)
+        shots_label = QtWidgets.QLabel("Shots")
+        shots_label.setObjectName("Muted")
+        row.addWidget(shots_label)
+        self.count_box = QtWidgets.QComboBox()
+        self.count_box.setObjectName("CountBox")
+        self.count_box.setEditable(True)
+        self.count_box.setInsertPolicy(QtWidgets.QComboBox.NoInsert)
+        self.count_box.addItems(["1", "3", "5", "7", "All"])
+        self.count_box.setCurrentText("All" if self.count is None else str(self.count))
+        self.count_box.setFixedWidth(74)
+        self.count_box.setToolTip("How many shots to show around yours. Pick one or type a number.")
+        self.count_box.lineEdit().setValidator(QtGui.QRegularExpressionValidator(
+            QtCore.QRegularExpression(r"^(?:[1-9][0-9]{0,3}|[Aa][Ll][Ll])$"), self.count_box))
+        self.count_box.activated.connect(lambda *_: self._on_count_entered())
+        self.count_box.lineEdit().editingFinished.connect(self._on_count_entered)
+        self.count_box.setVisible(self.slots_for_count is not None)
+        shots_label.setVisible(self.slots_for_count is not None)
+        row.addWidget(self.count_box)
+        row.addSpacing(6)
         self.mute_btn = icon_button("sound", "Mute / unmute sound  (M)", self._on_mute, checkable=True)
         self.loop_btn = icon_button("loop", "Loop the three shots  (L)", lambda: None, checkable=True)
         self.loop_btn.setChecked(True)
@@ -796,9 +1012,24 @@ class ShotContextWindow(QtWidgets.QDialog):
         return any(s.loading for s in self.slots)
 
     def _start_decoders(self):
-        for slot in self.slots:
-            if not slot.frames and slot.media is not None and slot.media.kind == "movie":
-                self._decode(slot, slot.media.path)
+        self._pump_decodes()
+
+    def _distance(self, slot):
+        try:
+            return abs(self.slots.index(slot) - self._current_index())
+        except ValueError:
+            return 10 ** 6
+
+    def _pump_decodes(self):
+        """Start movie decodes, nearest to your shot first, at most MAX_DECODERS at a time."""
+        busy = sum(1 for sl in self.slots if sl.decoder is not None)
+        waiting = [sl for sl in self.slots
+                   if not sl.pending and not sl.frames and sl.decoder is None and not sl.error
+                   and sl.media is not None and sl.media.kind == "movie"]
+        for sl in sorted(waiting, key=self._distance)[:max(0, self.MAX_DECODERS - busy)]:
+            self._decode(sl, sl.media.path)
+        for sl in waiting:
+            sl.loading = True
         self.timeline.update()
 
     def _decode(self, slot, path):
@@ -822,6 +1053,8 @@ class ShotContextWindow(QtWidgets.QDialog):
         index, local = self._locate(self._frame)
         slot.loading = False
         slot.decoder = None
+        if slot not in self.slots:
+            return
         if frames:
             slot.frames = frames
             if fps:
@@ -833,9 +1066,10 @@ class ShotContextWindow(QtWidgets.QDialog):
         self._frame = min(self._slot_start(index) + local, self.total - 1)
         if self._playing:
             self._rebase()
-        if not self._any_loading() and not self._playing and self._autoplay:
-            self._seek(0)
+        if not self._playing and self._autoplay:
+            self._seek(self._slot_start(max(0, self._current_index() - 1)))
         self._show()
+        self._pump_decodes()
         self._maybe_autoplay()
 
     def _setup_audio(self, slot):
@@ -845,6 +1079,82 @@ class ShotContextWindow(QtWidgets.QDialog):
         if path and path not in self._clips:
             self._clips[path] = _Clip(path, self)
         slot._clip_path = path
+
+    def _sync_scrollbar(self):
+        bar, tl = self.timeline_scroll, self.timeline
+        extra = int(round(tl.content_width - tl.view_width()))
+        bar.setVisible(extra > 0)
+        bar.blockSignals(True)
+        bar.setRange(0, max(0, extra))
+        bar.setPageStep(int(tl.view_width()))
+        bar.setSingleStep(40)
+        bar.setValue(int(round(tl.offset)))
+        bar.blockSignals(False)
+
+    # ---- number of shots
+    def _on_count_entered(self):
+        text = self.count_box.currentText().strip().lower()
+        if not text:
+            self.count_box.setCurrentText("All" if self.count is None else str(self.count))
+            return
+        size = None if text == "all" else int(text)
+        self.count_box.setCurrentText("All" if size is None else str(size))
+        if size == self.count or self.slots_for_count is None:
+            return
+        self.count = size
+        self.set_slots(self.slots_for_count(size))
+
+    def set_slots(self, slots):
+        """Show another set of shots; shots that stay keep their frames and chosen version."""
+        index, local = self._locate(self._frame)
+        keep_code = self.slots[index].code if self.slots else None
+        for sl in self.slots:
+            if sl not in slots and sl.decoder is not None:
+                sl.decoder.cancel()
+                sl.decoder = None
+                sl.loading = False
+        self.slots = slots
+        for sl in slots:
+            if not hasattr(sl, "_clip_path"):
+                self._setup_audio(sl)
+        self._relayout()
+        target = next((i for i, sl in enumerate(slots) if sl.code == keep_code), None)
+        if target is None:
+            target, local = max(0, self._current_index() - 1), 0
+        self._frame = min(self._slot_start(target) + local, self.total - 1)
+        if self._playing:
+            self._rebase()
+        self._show()
+        self._pump_decodes()
+        self._resolve_timer.start(0)
+        n = len(slots)
+        self.status.setText("Showing %d shot%s" % (n, "" if n == 1 else "s"))
+
+    def _resolve_next(self):
+        """Look up one pending shot (nearest to yours first), then come back for the next."""
+        pending = [sl for sl in self.slots if sl.pending]
+        if not pending or self.resolve_slot is None:
+            return
+        slot = min(pending, key=self._distance)
+        try:
+            self.resolve_slot(slot)
+        except Exception as e:
+            slot.error = "Lookup failed: %s" % e
+            slot.kind = "error"
+        slot.pending = False
+        slot.loading = False
+        self._setup_audio(slot)
+        index, local = self._locate(self._frame)
+        current_code = self.slots[index].code
+        self._relayout()
+        i = next(i for i, sl in enumerate(self.slots) if sl.code == current_code)
+        self._frame = min(self._slot_start(i) + min(local, self.slots[i].length - 1), self.total - 1)
+        if self._playing:
+            self._rebase()
+        self._show()
+        self._pump_decodes()
+        if any(sl.pending for sl in self.slots):
+            self._resolve_timer.start(0)
 
     # ---- versions
     def _option_text(self, m):
@@ -864,11 +1174,18 @@ class ShotContextWindow(QtWidgets.QDialog):
             "QMenu::separator {{ height: 1px; background: {b}; margin: 5px 8px; }}"
             "QMenu::indicator {{ width: 12px; height: 12px; left: 8px; }}".format(
                 s=CARD, t=TEXT, b=BORDER, h=PANEL, d=DIM))
-        title = menu.addAction("%s  ·  choose a version" % slot.code)
-        title.setEnabled(False)
-        menu.addSeparator()
+        toggle = menu.addAction("Enable for playback" if slot.disabled else "Disable for playback")
+        enabled_left = sum(1 for sl in self.slots if not sl.disabled)
+        if not slot.disabled and enabled_left <= 1:
+            toggle.setEnabled(False)
+            toggle.setText("Disable for playback (the last shot that's on)")
+        toggle.triggered.connect(lambda checked=False, s=slot: self.set_disabled(s, not s.disabled))
+        if len(slot.options) > 1:
+            menu.addSeparator()
+            title = menu.addAction("%s  ·  choose a version" % slot.code)
+            title.setEnabled(False)
         footage_started = False
-        for m in slot.options:
+        for m in (slot.options if len(slot.options) > 1 else []):
             if m.source == "footage" and not footage_started:
                 menu.addSeparator()
                 footage_started = True
@@ -877,6 +1194,40 @@ class ShotContextWindow(QtWidgets.QDialog):
             action.setChecked(m is slot.media)
             action.triggered.connect(lambda checked=False, s=slot, o=m: self._switch(s, o))
         menu.exec_(global_pos) if hasattr(menu, "exec_") else menu.exec(global_pos)
+
+    def set_disabled(self, slot, disabled):
+        if disabled and sum(1 for sl in self.slots if not sl.disabled) <= 1:
+            return
+        slot.disabled = disabled
+        self.timeline.update()
+        if disabled and self._locate(self._frame)[0] == self.slots.index(slot):
+            self._skip_disabled(forward=True)
+        self._show()
+        self.status.setText("%s %s for playback" % (slot.code, "disabled" if disabled else "enabled"))
+
+    def _next_enabled(self, index, forward=True):
+        """Index of the first enabled shot from *index* on (wrapping), or None."""
+        n = len(self.slots)
+        for k in range(n):
+            j = (index + k) % n if forward else (index - k) % n
+            if not self.slots[j].disabled:
+                return j
+        return None
+
+    def _skip_disabled(self, forward=True):
+        """If the playhead is on a disabled shot, move it to the start of the next enabled one."""
+        index, _ = self._locate(self._frame)
+        if not self.slots[index].disabled:
+            return True
+        j = self._next_enabled(index, forward)
+        if j is None:
+            return False
+        if forward and j < index and not self.loop_btn.isChecked():
+            return False  # nothing enabled after this point and no loop
+        self._frame = self._slot_start(j)
+        if self._playing:
+            self._rebase()
+        return True
 
     def _switch(self, slot, m):
         if m is slot.media:
@@ -913,7 +1264,9 @@ class ShotContextWindow(QtWidgets.QDialog):
 
     # ---- transport
     def _maybe_autoplay(self):
-        if self._autoplay and not self._any_loading() and not self._playing:
+        i = self._current_index()
+        near = self.slots[max(0, i - 1):i + 2]
+        if self._autoplay and not any(sl.loading for sl in near) and not self._playing:
             self._autoplay = False
             self.play()
 
@@ -926,6 +1279,7 @@ class ShotContextWindow(QtWidgets.QDialog):
         if self._frame >= self.total - 1:
             self._frame = 0
         self._playing = True
+        self._skip_disabled(forward=True)
         self._rebase()
         self._timer.start()
         self._update_play_icon()
@@ -948,7 +1302,10 @@ class ShotContextWindow(QtWidgets.QDialog):
         if delta < 0 and local > 2:
             target = index           # back to the start of this shot first
         else:
-            target = max(0, min(len(self.slots) - 1, index + delta))
+            target = index + delta
+            while 0 <= target < len(self.slots) and self.slots[target].disabled:
+                target += 1 if delta > 0 else -1
+            target = max(0, min(len(self.slots) - 1, target))
         self._seek(self._slot_start(target))
         if self._playing:
             self._rebase()
@@ -963,7 +1320,9 @@ class ShotContextWindow(QtWidgets.QDialog):
             if self.loop_btn.isChecked():
                 self._frame = 0
                 self._rebase()
-                frame = 0
+                self._skip_disabled(forward=True)
+                frame = self._frame
+                self._show()
             else:
                 self._frame = self.total - 1
                 self.pause()
@@ -971,6 +1330,9 @@ class ShotContextWindow(QtWidgets.QDialog):
                 return
         if frame != self._frame:
             self._frame = frame
+            if not self._skip_disabled(forward=True):
+                self._frame = self.total - 1
+                self.pause()
             self._show()
         self._sync_audio()
 
@@ -1013,6 +1375,8 @@ class ShotContextWindow(QtWidgets.QDialog):
         image = self._image(slot.frames[local]) if slot.frames else None
         self.view.show_frame(slot, local, image)
         self.timeline.set_position(self._frame)
+        if not self._scrubbing:
+            self.timeline.ensure_visible(self._frame)
         if slot.role == "current":
             self.frame_label.setText("%s  %d" % (slot.code, slot.first_frame + local))
         else:
@@ -1057,6 +1421,7 @@ class ShotContextWindow(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         self._timer.stop()
+        self._resolve_timer.stop()
         for d in self._decoders:
             d.cancel()
         for c in self._clips.values():
