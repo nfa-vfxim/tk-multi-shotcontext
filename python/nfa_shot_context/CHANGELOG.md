@@ -1,5 +1,12 @@
 # NFA Shot Context — Changelog
 
+## [1.2.0] — 2026-10-23 (Luuk)
+- Choose a version per shot: the ▾ button on each shot in the bar (or right-click) lists every playblast of that
+  shot (ShotGrid and Maya folders, newest first) plus the footage; your own shot also lists your earlier takes.
+  Only the version you pick is loaded (decoded / downloaded on demand).
+- Removed the Re-playblast button: restart the tool instead (that's how animators work).
+- Runs as Toolkit app `tk-multi-shotcontext` (ShotGrid > Shot Context...).
+
 ## [1.1.0] — 2026-10-23 (Luuk)
 - Same black look as the Review tool's playblast preview instead of the purple NFA palette: black rounded
   viewport with a play badge when paused, white round play button, blue accent, transport and footer bars,

@@ -136,6 +136,7 @@ class ShotInfo(object):
         self.duration_source = ""   # where the duration came from
         self.slate_text = ""
         self.notes = []
+        self.options = []           # every Media the artist can switch to, newest playblast first
 
     def __repr__(self):
         return "ShotInfo(%s, %s, %s, %s)" % (self.code, self.role, self.kind, self.media)
@@ -395,29 +396,39 @@ def download_uploaded_movie(sc, media):
         return None
 
 
-def newest_playblast(sc, shot):
+def list_playblasts(sc, shot):
     """
-    The latest form of a playblast: whichever is newer, the newest ShotGrid
-    playblast Version or the newest file in the Maya folder structure.
+    Every playblast of a shot, newest first: ShotGrid playblast Versions and
+    movies / image sequences in the Maya folder structure. A file that is
+    reachable both ways is listed once, as its ShotGrid Version.
     """
     candidates = []
     for d in maya_preview_dirs(sc, shot):
         candidates.extend(scan_preview_dir(d))
     candidates.extend(shotgrid_playblasts(sc, shot))
-    if not candidates:
-        return None
-    # Same file reachable both ways -> keep the ShotGrid entry (nicer label).
     by_path = {}
     for c in candidates:
         key = _norm(c.path).lower() if c.path else id(c)
         if key not in by_path or c.source == "shotgrid":
             by_path[key] = c
-    for c in sorted(by_path.values(), key=lambda m: m.timestamp, reverse=True):
-        if c.path is None:
-            c.path = download_uploaded_movie(sc, c)
-            if not c.path:
-                continue
-        return c
+    return sorted(by_path.values(), key=lambda m: m.timestamp, reverse=True)
+
+
+def ensure_local(sc, media):
+    """Make sure *media* has a local path (downloads an uploaded movie). True when playable."""
+    if media.path is None:
+        media.path = download_uploaded_movie(sc, media)
+    return bool(media.path)
+
+
+def newest_playblast(sc, shot, playblasts=None):
+    """
+    The latest form of a playblast: whichever is newer, the newest ShotGrid
+    playblast Version or the newest file in the Maya folder structure.
+    """
+    for c in (playblasts if playblasts is not None else list_playblasts(sc, shot)):
+        if ensure_local(sc, c):
+            return c
     return None
 
 
@@ -481,14 +492,17 @@ def resolve_neighbour(sc, shot, role, fps):
     info = ShotInfo(shot, role)
     info.duration, info.duration_source = shot_duration(shot)
 
-    media = newest_playblast(sc, shot)
+    playblasts = list_playblasts(sc, shot)
+    footage, plate_frames = find_footage(sc, shot)
+    info.options = playblasts + ([footage] if footage else [])
+
+    media = newest_playblast(sc, shot, playblasts)
     if media:
         info.media, info.kind = media, "playblast"
         return info
 
-    media, plate_frames = find_footage(sc, shot)
-    if media:
-        info.media, info.kind = media, "footage"
+    if footage:
+        info.media, info.kind = footage, "footage"
         return info
 
     info.kind = "slate"

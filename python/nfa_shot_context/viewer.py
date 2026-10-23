@@ -26,7 +26,7 @@ from . import media
 __all__ = ["Slot", "ShotContextWindow"]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 AUTHOR = "Luuk Kamphuis"
 
 # --- Theme: same black look as the Review tool's playblast preview
@@ -139,6 +139,12 @@ QToolTip {{
 }}
 """.format(bg=BG, surface=CARD, surface_hover=PANEL, border=BORDER, text=TEXT, muted=DIM,
            accent=ACCENT, accent_hover=ACCENT_HOVER, accent_pressed=ACCENT_PRESSED)
+
+
+def _first_number(path, default=1):
+    import re as _re
+    m = _re.search(r"(\d+)\.[A-Za-z]+$", os.path.basename(path or ""))
+    return int(m.group(1)) if m else default
 
 
 def _age(ts):
@@ -258,6 +264,11 @@ class Slot(object):
         self.audio_fps = fps
         self.description = ""
         self.placeholder = info.duration or int(round(2 * fps))
+        self.media = info.media             # what is shown now
+        self.options = list(info.options)   # what the artist can switch to
+        self.scene_audio = None             # (path, start frame) for the fresh playblast
+        self.fresh = None                   # the playblast made when the tool opened
+        self.decoder = None
 
     @property
     def length(self):
@@ -454,15 +465,18 @@ class TimelineBar(QtWidgets.QWidget):
 
     scrubbed = QtCore.Signal(int)
     scrub_state = QtCore.Signal(bool)
+    version_menu = QtCore.Signal(int, QtCore.QPoint)   # slot index, global position
 
     def __init__(self, parent=None):
         super(TimelineBar, self).__init__(parent)
         self.setMinimumHeight(58)
         self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setMouseTracking(True)
         self.slots = []
         self.position = 0
         self.total = 1
+        self._menu_rects = {}
 
     def set_slots(self, slots):
         self.slots = slots
@@ -482,7 +496,8 @@ class TimelineBar(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.Antialiasing)
         top, h = 4, self.height() - 8
         start = 0
-        for slot in self.slots:
+        self._menu_rects = {}
+        for index, slot in enumerate(self.slots):
             x0, x1 = self._x(start), self._x(start + slot.length)
             rect = QtCore.QRectF(x0 + 1.5, top, x1 - x0 - 3, h)
             current = slot.role == "current"
@@ -499,6 +514,18 @@ class TimelineBar(QtWidgets.QWidget):
             p.setBrush(colour)
             p.drawRoundedRect(QtCore.QRectF(rect.x() + 8, rect.bottom() - 7, max(0.0, rect.width() - 16), 3), 1.5, 1.5)
             text_rect = rect.adjusted(10, 5, -10, -10)
+            if len(slot.options) > 1 and rect.width() > 70:
+                # version button (top right of the block)
+                btn = QtCore.QRectF(rect.right() - 30, rect.y() + 6, 22, 20)
+                self._menu_rects[index] = btn
+                p.setPen(QtCore.Qt.NoPen)
+                p.setBrush(QtGui.QColor(PANEL))
+                p.drawRoundedRect(btn, 5, 5)
+                p.setBrush(QtGui.QColor(TEXT))
+                c = btn.center()
+                p.drawPolygon(QtGui.QPolygonF([QtCore.QPointF(c.x() - 4, c.y() - 2), QtCore.QPointF(c.x() + 4, c.y() - 2),
+                                               QtCore.QPointF(c.x(), c.y() + 3)]))
+                text_rect = text_rect.adjusted(0, 0, -28, 0)
             p.setPen(QtGui.QColor(TEXT))
             p.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold))
             fm = p.fontMetrics()
@@ -521,12 +548,34 @@ class TimelineBar(QtWidgets.QWidget):
         f = int((x - r.x()) / float(max(1, r.width())) * self.total)
         return max(0, min(self.total - 1, f))
 
+    def _slot_at(self, x):
+        start = 0
+        for i, slot in enumerate(self.slots):
+            if self._x(start) <= x < self._x(start + slot.length):
+                return i
+            start += slot.length
+        return len(self.slots) - 1
+
     def mousePressEvent(self, event):
+        pos = event.position() if hasattr(event, "position") else QtCore.QPointF(event.pos())
+        glob = event.globalPosition().toPoint() if hasattr(event, "globalPosition") else event.globalPos()
+        for index, rect in self._menu_rects.items():
+            if rect.contains(pos):
+                self.version_menu.emit(index, glob)
+                return
+        if event.button() == QtCore.Qt.RightButton:
+            index = self._slot_at(pos.x())
+            if len(self.slots[index].options) > 1:
+                self.version_menu.emit(index, glob)
+            return
         if event.button() == QtCore.Qt.LeftButton:
             self.scrub_state.emit(True)
             self.scrubbed.emit(self._frame_at(event.position().x() if hasattr(event, "position") else event.x()))
 
     def mouseMoveEvent(self, event):
+        pos = event.position() if hasattr(event, "position") else QtCore.QPointF(event.pos())
+        over = any(r.contains(pos) for r in self._menu_rects.values())
+        self.setToolTip("Choose another version of this shot" if over else "")
         if event.buttons() & QtCore.Qt.LeftButton:
             self.scrubbed.emit(self._frame_at(event.position().x() if hasattr(event, "position") else event.x()))
 
@@ -539,11 +588,11 @@ class TimelineBar(QtWidgets.QWidget):
 class ShotContextWindow(QtWidgets.QDialog):
     """
     slots:        [Slot] in cut order
-    replayblast:  callable() -> (frames, first_frame, audio_path, audio_start_frame, status)
-                  or None; used by the Re-playblast button
+    resolve_media: callable(Media) -> bool; makes an option playable (downloads an
+                  uploaded ShotGrid movie). Used when the artist picks another version.
     """
 
-    def __init__(self, slots, fps, context_text="", status="", replayblast=None, parent=None):
+    def __init__(self, slots, fps, context_text="", status="", resolve_media=None, parent=None):
         super(ShotContextWindow, self).__init__(parent)
         self.setObjectName("ShotContext")
         self.setWindowTitle("NFA Shot Context")
@@ -552,7 +601,7 @@ class ShotContextWindow(QtWidgets.QDialog):
         self.resize(1180, 820)
         self.fps = float(fps or 25.0)
         self.slots = slots
-        self.replayblast = replayblast
+        self.resolve_media = resolve_media
         self.aspect = (16, 9)
         self._decoders = []
         self._cache = collections.OrderedDict()
@@ -617,6 +666,7 @@ class ShotContextWindow(QtWidgets.QDialog):
         self.timeline = TimelineBar(self)
         self.timeline.scrubbed.connect(self._on_scrub)
         self.timeline.scrub_state.connect(self._on_scrub_state)
+        self.timeline.version_menu.connect(self._show_versions)
         root.addWidget(self.timeline)
 
         # --- transport ---
@@ -690,19 +740,11 @@ class ShotContextWindow(QtWidgets.QDialog):
         close_btn.setCursor(QtCore.Qt.PointingHandCursor)
         close_btn.clicked.connect(self.close)
         foot.addWidget(close_btn)
-        self.replay_btn = QtWidgets.QPushButton("Re-playblast")
-        self.replay_btn.setObjectName("PrimaryButton")
-        self.replay_btn.setAutoDefault(False)
-        self.replay_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.replay_btn.setToolTip("Playblast your shot again and keep the neighbours")
-        self.replay_btn.clicked.connect(self._on_replayblast)
-        self.replay_btn.setVisible(self.replayblast is not None)
-        foot.addWidget(self.replay_btn)
         root.addWidget(footer)
 
         # Keyboard goes to the player; Enter never triggers a button
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
-        for w in (help_btn, close_btn, self.replay_btn):
+        for w in (help_btn, close_btn):
             w.setFocusPolicy(QtCore.Qt.NoFocus)
         self._update_play_icon()
 
@@ -755,16 +797,20 @@ class ShotContextWindow(QtWidgets.QDialog):
 
     def _start_decoders(self):
         for slot in self.slots:
-            m = slot.info.media
-            if slot.frames or m is None or m.kind != "movie":
-                continue
-            slot.loading = True
-            dec = media.MovieDecoder(m.path, self)
-            dec.progress.connect(lambda v, s=slot: self._on_decode_progress(s, v))
-            dec.finished.connect(lambda frames, fps, err, s=slot: self._on_decoded(s, frames, fps, err))
-            self._decoders.append(dec)
-            dec.start()
+            if not slot.frames and slot.media is not None and slot.media.kind == "movie":
+                self._decode(slot, slot.media.path)
         self.timeline.update()
+
+    def _decode(self, slot, path):
+        if slot.decoder is not None:
+            slot.decoder.cancel()
+        slot.loading, slot.progress, slot.error = True, 0.0, ""
+        dec = media.MovieDecoder(path, self)
+        slot.decoder = dec
+        dec.progress.connect(lambda v, s=slot, d=dec: s.decoder is d and self._on_decode_progress(s, v))
+        dec.finished.connect(lambda frames, fps, err, s=slot, d=dec: s.decoder is d and self._on_decoded(s, frames, fps, err))
+        self._decoders.append(dec)
+        dec.start()
 
     def _on_decode_progress(self, slot, value):
         slot.progress = value
@@ -775,6 +821,7 @@ class ShotContextWindow(QtWidgets.QDialog):
     def _on_decoded(self, slot, frames, fps, error):
         index, local = self._locate(self._frame)
         slot.loading = False
+        slot.decoder = None
         if frames:
             slot.frames = frames
             if fps:
@@ -793,11 +840,76 @@ class ShotContextWindow(QtWidgets.QDialog):
 
     def _setup_audio(self, slot):
         path = slot.audio_path
-        if path is None and slot.info.media is not None and slot.info.media.kind == "movie":
-            path = slot.info.media.path  # the movie's own sound, if it has any
+        if path is None and slot.media is not None and slot.media.kind == "movie":
+            path = slot.media.path  # the movie's own sound, if it has any
         if path and path not in self._clips:
             self._clips[path] = _Clip(path, self)
         slot._clip_path = path
+
+    # ---- versions
+    def _option_text(self, m):
+        source = {"shotgrid": "ShotGrid", "folder": "Maya folder", "footage": "Footage",
+                  "fresh": "Just playblasted"}.get(m.source, m.source)
+        when = _age(m.timestamp)
+        return "%s     %s%s" % (m.label, source, (" · " + when) if when and m.source != "fresh" else "")
+
+    def _show_versions(self, index, global_pos):
+        slot = self.slots[index]
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet(
+            "QMenu {{ background: {s}; color: {t}; border: 1px solid {b}; border-radius: 8px; padding: 6px; }}"
+            "QMenu::item {{ padding: 6px 18px 6px 26px; border-radius: 6px; }}"
+            "QMenu::item:selected {{ background: {h}; }}"
+            "QMenu::item:disabled {{ color: {d}; }}"
+            "QMenu::separator {{ height: 1px; background: {b}; margin: 5px 8px; }}"
+            "QMenu::indicator {{ width: 12px; height: 12px; left: 8px; }}".format(
+                s=CARD, t=TEXT, b=BORDER, h=PANEL, d=DIM))
+        title = menu.addAction("%s  ·  choose a version" % slot.code)
+        title.setEnabled(False)
+        menu.addSeparator()
+        footage_started = False
+        for m in slot.options:
+            if m.source == "footage" and not footage_started:
+                menu.addSeparator()
+                footage_started = True
+            action = menu.addAction(self._option_text(m))
+            action.setCheckable(True)
+            action.setChecked(m is slot.media)
+            action.triggered.connect(lambda checked=False, s=slot, o=m: self._switch(s, o))
+        menu.exec_(global_pos) if hasattr(menu, "exec_") else menu.exec(global_pos)
+
+    def _switch(self, slot, m):
+        if m is slot.media:
+            return
+        if self.resolve_media is not None and not self.resolve_media(m):
+            self.status.setText("Couldn't load %s for %s" % (m.label, slot.code))
+            return
+        if slot.decoder is not None:
+            slot.decoder.cancel()
+            slot.decoder = None
+        for p in slot.frames:
+            self._cache.pop(p, None)
+        slot.media = m
+        slot.kind = "footage" if m.source == "footage" else "playblast"
+        slot.error = ""
+        slot.loading = False
+        when = _age(m.timestamp) if m.source != "fresh" else "just now"
+        slot.description = "%s%s" % (m.label, (" · " + when) if when else "")
+        slot.audio_path, slot.audio_start_frame = (slot.scene_audio or (None, 0.0)) if m is slot.fresh else (None, 0.0)
+        if m.kind == "frames":
+            slot.frames = list(m.frames)
+            slot.first_frame = _first_number(m.frames[0], default=1)
+        else:
+            slot.frames = []
+            slot.first_frame = 1
+            slot.placeholder = slot.info.duration or slot.placeholder
+            self._decode(slot, m.path)
+        self._setup_audio(slot)
+        self._relayout()
+        self._seek(self._slot_start(self.slots.index(slot)))
+        if self._playing:
+            self._rebase()
+        self.status.setText("%s: showing %s" % (slot.code, slot.description))
 
     # ---- transport
     def _maybe_autoplay(self):
@@ -916,36 +1028,6 @@ class ShotContextWindow(QtWidgets.QDialog):
         path = os.path.join(HERE, "HELP.html")
         if os.path.isfile(path):
             webbrowser.open("file:///" + path.replace("\\", "/"))
-
-    def _on_replayblast(self):
-        if not self.replayblast:
-            return
-        self.pause()
-        self.replay_btn.setEnabled(False)
-        self.replay_btn.setText("Playblasting…")
-        QtWidgets.QApplication.processEvents()
-        try:
-            result = self.replayblast()
-        except Exception as e:
-            self.status.setText("Playblast failed: %s" % e)
-            result = None
-        finally:
-            self.replay_btn.setEnabled(True)
-            self.replay_btn.setText("Re-playblast")
-        if not result:
-            return
-        frames, first_frame, audio_path, audio_start, status = result
-        i = self._current_index()
-        slot = self.slots[i]
-        for p in slot.frames:
-            self._cache.pop(p, None)
-        slot.frames, slot.first_frame = frames, first_frame
-        slot.audio_path, slot.audio_start_frame = audio_path, audio_start
-        self._setup_audio(slot)
-        self.status.setText(status)
-        self._relayout()
-        self._seek(self._slot_start(max(0, i - 1)))
-        self.play()
 
     def keyPressEvent(self, event):
         k = event.key()

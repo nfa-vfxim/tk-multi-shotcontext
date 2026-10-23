@@ -10,9 +10,10 @@ ShotGrid, with a shot work file open.
 """
 
 import os
+import time
 import traceback
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 __author__ = "Luuk Kamphuis"
 
 _WINDOW = None
@@ -156,7 +157,14 @@ def show():
             if role == "current":
                 info = sg_lookup.ShotInfo(shot, role)
                 info.kind = "playblast"
-                info.media = sg_lookup.Media("frames", pb.folder, 0, "this playblast", frames=pb.frames)
+                info.media = sg_lookup.Media("frames", pb.folder, time.time(), "This playblast",
+                                             frames=pb.frames, source="fresh")
+                # Older takes and other playblasts of this shot, plus footage, to switch to
+                fresh_key = os.path.normcase(os.path.normpath(pb.folder))
+                older = [m for m in sg_lookup.list_playblasts(sc, shot)
+                         if not (m.path and os.path.normcase(os.path.normpath(m.path)) == fresh_key)]
+                footage, _ = sg_lookup.find_footage(sc, shot)
+                info.options = [info.media] + older + ([footage] if footage else [])
                 infos.append(info)
             else:
                 progress.step("Looking up %s…" % shot.get("code"))
@@ -183,9 +191,11 @@ def show():
         if info.role == "current":
             slot.frames = list(pb.frames)
             slot.first_frame = pb.first_frame
+            slot.fresh = m
             if pb.audio_path:
                 slot.audio_path = pb.audio_path
                 slot.audio_start_frame = pb.audio_offset - pb.first_frame
+                slot.scene_audio = (slot.audio_path, slot.audio_start_frame)
             slot.description = "Playblast of %s" % (pb.camera or "the viewport")
         elif m is not None and m.kind == "frames":
             slot.frames = list(m.frames)
@@ -196,15 +206,11 @@ def show():
         print("[NFA Shot Context] %s (%s): %s %s" % (info.code, info.role, info.kind,
                                                       m.path if m else "; ".join(info.notes)))
 
-    def replayblast():
-        new = playblast.make_playblast(sc, shot_record=current)
-        start = (new.audio_offset - new.first_frame) if new.audio_path else 0
-        return new.frames, new.first_frame, new.audio_path, start, _status_for(new)
-
     step = (sc.step or {}).get("name") or ""
     context_text = "  ·  ".join(x for x in ((sc.project or {}).get("name"), current.get("code"), step) if x)
     _WINDOW = viewer.ShotContextWindow(slots, fps, context_text=context_text, status=_status_for(pb),
-                                       replayblast=replayblast, parent=_maya_main_window())
+                                       resolve_media=lambda m: sg_lookup.ensure_local(sc, m),
+                                       parent=_maya_main_window())
     _WINDOW.setAttribute(viewer.QtCore.Qt.WA_DeleteOnClose, True)
     _WINDOW.show()
     _WINDOW.raise_()
