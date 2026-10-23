@@ -26,7 +26,7 @@ from . import media
 __all__ = ["Slot", "ShotContextWindow"]
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 AUTHOR = "Luuk Kamphuis"
 
 # --- Theme: same black look as the Review tool's playblast preview
@@ -548,10 +548,12 @@ class FrameView(QtWidgets.QWidget):
 
 class TimelineBar(QtWidgets.QWidget):
     """
-    One block per shot, sized by length but never narrower than MIN_BLOCK, so the
-    text stays readable. When the blocks don't fit, the bar scrolls (offset)."""
+    One block per shot: a fixed BASE width for the text plus a width per frame, so
+    longer shots are always wider blocks. When the blocks don't fit, the bar
+    scrolls (offset)."""
 
-    MIN_BLOCK = 130
+    BASE = 110
+    MIN_PX_PER_FRAME = 2.0
 
     scrubbed = QtCore.Signal(int)
     scrub_state = QtCore.Signal(bool)
@@ -586,30 +588,21 @@ class TimelineBar(QtWidgets.QWidget):
         return max(1.0, self.width() - 4.0)
 
     def _layout(self):
-        """Block widths: proportional to length, at least MIN_BLOCK, filling the bar when they fit."""
+        """
+        Block width = BASE (room for the text) + frames * px_per_frame, so a longer
+        shot is always a wider block. When everything fits, px_per_frame fills the
+        bar; otherwise it's at least MIN_PX_PER_FRAME and the bar scrolls.
+        """
         view = self.view_width()
         lengths = [max(1, sl.length) for sl in self.slots]
         if not lengths:
             self._blocks, self.content_width = [], view
             return
-        # find a scale where blocks fill the view; small blocks are lifted to MIN_BLOCK
-        scale = view / float(sum(lengths))
-        for _ in range(8):
-            widths = [max(self.MIN_BLOCK, n * scale) for n in lengths]
-            fixed = sum(w for w, n in zip(widths, lengths) if n * scale < self.MIN_BLOCK)
-            free = sum(n for n in lengths if n * scale >= self.MIN_BLOCK)
-            if not free or view - fixed <= 0:
-                break
-            new_scale = (view - fixed) / float(free)
-            if abs(new_scale - scale) < 1e-6:
-                break
-            scale = new_scale
-        widths = [max(self.MIN_BLOCK, n * scale) for n in lengths]
-        if sum(widths) < view:  # everything fits: stretch to fill
-            k = view / sum(widths)
-            widths = [w * k for w in widths]
+        px = (view - self.BASE * len(lengths)) / float(sum(lengths))
+        px = max(px, self.MIN_PX_PER_FRAME)
         x, self._blocks = 0.0, []
-        for w in widths:
+        for n in lengths:
+            w = self.BASE + n * px
             self._blocks.append((x, x + w))
             x += w
         self.content_width = x

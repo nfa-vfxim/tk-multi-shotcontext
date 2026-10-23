@@ -1,5 +1,10 @@
 # NFA Shot Context — Changelog
 
+## [1.4.1] — 2026-10-23 (Luuk)
+- A longer shot is always a wider block: block width = 110 px for the text + a width per frame (fills the bar
+  when everything fits, at least 2 px per frame when it scrolls). In 1.4.0 short shots were all lifted to the
+  same minimum width.
+
 ## [1.4.0] — 2026-10-23 (Luuk)
 - The shot bar scrolls like an editor's timeline: blocks stay at least 130 px wide so code, status, frames and ▾
   stay readable, and a scrollbar appears under the bar when they don't fit (mouse wheel works too). The bar
